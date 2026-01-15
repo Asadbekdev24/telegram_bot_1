@@ -1,0 +1,188 @@
+BOT_TOKEN = "8413845155:AAHBLmNecBHW1DHyhMorqgDNLOojVTVgJxo"
+GROUP_ID = -1001410191264  # Guruhning haqiqiy ID'si (manfiy son bo'ladi)
+ADMIN_CONTACT = "@beknazarovuz"
+
+
+
+
+
+
+
+
+import asyncio
+import logging
+import sqlite3
+from aiogram import Bot, Dispatcher, Router, F
+from aiogram.types import Message, ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import Command
+
+# --- SOZLAMALAR ---
+BOT_TOKEN = "8413845155:AAHBLmNecBHW1DHyhMorqgDNLOojVTVgJxo"
+GROUP_ID = -1001410191264  # Guruhning haqiqiy ID'si (manfiy son bo'ladi)
+ADMIN_CONTACT = "@beknazarovuz"
+
+# --- BAZA BILAN ISHLASH ---
+def init_db():
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS verified_users (
+            user_id INTEGER PRIMARY KEY
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def add_user_to_db(user_id):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT OR IGNORE INTO verified_users (user_id) VALUES (?)", (user_id,))
+        conn.commit()
+    except:
+        pass
+    conn.close()
+
+def remove_user_from_db(user_id):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM verified_users WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+def is_user_verified(user_id):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM verified_users WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result is not None
+
+# --- RUXSATLAR ---
+RESTRICTED_PERMISSIONS = ChatPermissions(
+    can_send_messages=False,
+    can_send_audios=False,
+    can_send_documents=False,
+    can_send_photos=False,
+    can_send_videos=False,
+    can_send_voice_notes=False,
+    can_send_polls=False
+)
+
+UNRESTRICTED_PERMISSIONS = ChatPermissions(
+    can_send_messages=True,
+    can_send_audios=True,
+    can_send_documents=True,
+    can_send_photos=True,
+    can_send_videos=True,
+    can_send_video_notes=True,
+    can_send_voice_notes=True,
+    can_send_polls=True,
+    can_send_other_messages=True,
+    can_add_web_page_previews=True
+)
+
+router = Router()
+logging.basicConfig(level=logging.INFO)
+
+# --- 1. Adminlarni aniqlash ---
+async def is_admin(chat_id: int, user_id: int, bot: Bot) -> bool:
+    member = await bot.get_chat_member(chat_id, user_id)
+    return member.status in ['creator', 'administrator']
+
+# --- 2. Xabarlarni Nazorat Qilish ---
+@router.message(F.chat.id == GROUP_ID)
+async def check_user_message(message: Message, bot: Bot):
+    user_id = message.from_user.id
+
+    # Adminlarni tekshirmaymiz
+    if await is_admin(GROUP_ID, user_id, bot):
+        return
+
+    # Agar bazada bo'lsa - indamaymiz
+    if is_user_verified(user_id):
+        return
+
+    # --- AGAR TASDIQLANMAGAN BO'LSA ---
+    try:
+        await message.delete()
+    except:
+        pass
+
+    try:
+        await bot.restrict_chat_member(
+            chat_id=GROUP_ID,
+            user_id=user_id,
+            permissions=RESTRICTED_PERMISSIONS
+        )
+    except:
+        pass
+
+    bot_info = await bot.get_me()
+    verify_url = f"https://t.me/{bot_info.username}?start=verify_{user_id}"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔐 Avtorizatsiyadan o'tish", url=verify_url)]
+    ])
+
+    warning_text = (
+        f"⚠️ **{message.from_user.first_name}**, guruhda yozish uchun avval "
+        f"bot orqali ro'yxatdan o'tishingiz kerak!\n\n"
+        f"Xabaringiz o'chirildi. Quyidagi tugmani bosing:"
+    )
+
+    sent_msg = await message.answer(warning_text, reply_markup=keyboard, parse_mode="Markdown")
+    await asyncio.sleep(15)
+    try:
+        await sent_msg.delete()
+    except:
+        pass
+
+# --- 3. Guruhdan chiqib ketganni bazadan o'chirish ---
+# BU YANGI QISM: Kimdir chiqib ketsa, avtorizatsiyasi bekor qilinadi
+@router.message(F.chat.id == GROUP_ID, F.left_chat_member)
+async def handle_left_member(message: Message):
+    user = message.left_chat_member
+    remove_user_from_db(user.id)
+    # Ixtiyoriy: Chiqib ketganini logga yozish
+    logging.info(f"Foydalanuvchi {user.full_name} chiqib ketdi va bazadan o'chirildi.")
+
+# --- 4. Avtorizatsiya Starti (Shaxsiy chatda) ---
+@router.message(Command("start"), F.chat.type == "private")
+async def start_verification(message: Message):
+    args = message.text.split()
+
+    if len(args) > 1 and "verify" in args[1]:
+        user_id = message.from_user.id
+
+        # Bazaga yozamiz
+        add_user_to_db(user_id)
+
+        # Guruhda ruxsat beramiz
+        try:
+            await message.bot.restrict_chat_member(
+                chat_id=GROUP_ID,
+                user_id=user_id,
+                permissions=UNRESTRICTED_PERMISSIONS
+            )
+            await message.answer("✅ Muvaffaqiyatli! Endi guruhda yoza olasiz.")
+        except Exception as e:
+            await message.answer(f"Guruhda ruxsat berishda xatolik: {e}\nBot guruhda admin ekanini tekshiring.")
+    else:
+        await message.answer("Botga xush kelibsiz! Guruhdan berilgan link orqali kiring.")
+
+# --- Asosiy ---
+async def main():
+    # Bazani yaratib olamiz (agar yo'q bo'lsa)
+    init_db()
+
+    bot = Bot(token=BOT_TOKEN)
+    dp = Dispatcher()
+    dp.include_router(router)
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
